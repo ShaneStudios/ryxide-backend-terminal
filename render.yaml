@@ -3,6 +3,8 @@ services:
     name: ryxide-terminal-backend
     env: node
     plan: free
+    # buildCommand: npm install 
+    # Render usually auto-detects
     startCommand: node server.js
     envVars:
       - key: NODE_VERSION
