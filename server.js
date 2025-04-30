@@ -1,90 +1,60 @@
 const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const pty = require('node-pty');
+const { exec } = require('child_process');
 const cors = require('cors');
-const os = require('os');
 const osTmpdir = require('os-tmpdir');
+const path = require('path');
+const fs = require('fs').promises;
 
 const app = express();
-app.use(cors());
+const port = process.env.PORT || 3030;
 
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+app.use(cors());
+app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.send('RyxIDE Terminal Backend Running');
+  res.send('RyxIDE Terminal Backend (HTTP Mode) Running');
 });
 
-wss.on('connection', (ws) => {
-  console.log('Terminal client connected');
+app.post('/execute', (req, res) => {
+  const command = req.body.command;
+  const cwd = req.body.cwd || osTmpdir() || process.env.HOME || process.cwd();
 
-  const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
-  let ptyProcess = null;
-
-  try {
-      ptyProcess = pty.spawn(shell, [], {
-        name: 'xterm-color',
-        cols: 80,
-        rows: 30,
-        cwd: osTmpdir() || process.env.HOME || process.cwd(),
-        env: { ...process.env, TERM: 'xterm-256color' }
-      });
-
-      console.log(`PTY process started (PID: ${ptyProcess.pid})`);
-
-      ptyProcess.onData((data) => {
-        try {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(data);
-          }
-        } catch (e) {
-           console.error("WS Send Error:", e);
-           try { ptyProcess?.kill(); } catch(killErr){}
-        }
-      });
-
-      ptyProcess.onExit(({ exitCode, signal }) => {
-        console.log(`PTY process exited (PID: ${ptyProcess.pid}, Code: ${exitCode}, Signal: ${signal})`);
-        ptyProcess = null;
-        try { if(ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close(); } catch (e) {}
-      });
-
-      ws.on('message', (message) => {
-         if (!ptyProcess) { return; }
-         try {
-             const msgString = message.toString();
-             if (msgString.startsWith('{"type":"resize","cols":')) {
-                 const resizeData = JSON.parse(msgString);
-                 if (resizeData.cols && resizeData.rows) {
-                     ptyProcess.resize(resizeData.cols, resizeData.rows);
-                 }
-             } else {
-                 ptyProcess.write(msgString);
-             }
-         } catch(e) { console.error("WS Message/PTY Write Error:", e); }
-      });
-
-      ws.on('close', () => {
-        console.log('Terminal client disconnected');
-        try { ptyProcess?.kill(); } catch (e) { console.error("Error killing PTY on ws close:", e); }
-        ptyProcess = null;
-      });
-
-      ws.on('error', (error) => {
-          console.error('WebSocket error:', error);
-          try { ptyProcess?.kill(); } catch (e) {}
-          ptyProcess = null;
-      });
-
-  } catch (e) {
-      console.error("Failed to spawn PTY process:", e);
-      try { ws.send(`\r\n\x1b[1;31mError creating terminal session: ${e.message}\x1b[0m\r\n`); ws.close(); } catch (wsErr) {}
+  if (!command || typeof command !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid "command" field.' });
   }
 
+  const forbiddenCommands = ['rm -rf /', 'sudo', 'reboot', 'shutdown'];
+  if (forbiddenCommands.some(forbidden => command.includes(forbidden))) {
+      return res.status(403).json({ error: 'Forbidden command pattern detected.', stdout: '', stderr: '' });
+  }
+
+  const shell = os.platform() === 'win32' ? 'powershell.exe' : '/bin/bash';
+
+  console.log(`Executing command: ${command} in ${cwd}`);
+
+  exec(command, {
+    cwd: cwd,
+    shell: shell,
+    timeout: 15000,
+    env: { ...process.env, TERM: 'xterm-256color' }
+  }, (error, stdout, stderr) => {
+    if (error) {
+      console.error(`Exec error: ${error}`);
+      const errorMessage = stderr ? `${error.message}\n${stderr}` : error.message;
+      if (error.signal === 'SIGTERM' || error.killed) {
+         return res.status(200).json({ stdout: stdout, stderr: `${stderr}\n\n[RyxIDE: Process timed out or killed]\n`, exitCode: error.code || -1 });
+      }
+      return res.status(200).json({ stdout: stdout, stderr: errorMessage, exitCode: error.code || 1 });
+    }
+
+    res.status(200).json({
+      stdout: stdout,
+      stderr: stderr,
+      exitCode: 0
+    });
+  });
 });
 
-const port = process.env.PORT || 3030;
-server.listen(port, '0.0.0.0', () => {
-  console.log(`Terminal WebSocket server listening on 0.0.0.0:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Terminal HTTP backend listening on 0.0.0.0:${port}`);
 });
