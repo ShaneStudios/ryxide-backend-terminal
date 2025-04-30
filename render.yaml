@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ryxide-terminal-backend
+    env: node
+    plan: free
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+    healthCheckPath: /
