@@ -1,10 +1,11 @@
 services:
   - type: web
-    name: ryxide-terminal-backend
+    name: ryxide-backend-terminal
     env: node
     plan: free
-    startCommand: node server.js
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    healthCheckPath: /
     envVars:
       - key: NODE_VERSION
         value: 18
-    healthCheckPath: /
