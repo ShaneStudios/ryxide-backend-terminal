@@ -18,6 +18,10 @@ const DEFAULT_SHELL = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
 const PYTHON_BACKEND_URL = 'https://ryxide-backend-terminal-fetch.onrender.com';
 const MAX_LOG_HEADERS = 10;
 
+const PYTHON_RETRY_ATTEMPTS = 20;
+const PYTHON_RETRY_DELAY_MS = 6000;
+
+
 console.log("Python backend URL configured:", PYTHON_BACKEND_URL);
 
 app.use(cors(corsOptions));
@@ -37,6 +41,30 @@ function addLogHeaders(response, logs, prefix) {
         }
     });
 }
+
+async function fetchWithRetry(url, options, retries, delay, logs) {
+    for (let i = 0; i <= retries; i++) {
+        logs.push(`Attempt ${i + 1} to fetch ${url}`);
+        try {
+            const response = await fetch(url, options);
+            logs.push(`Received response status: ${response.status}`);
+            return response;
+        } catch (error) {
+            logs.push(`Fetch attempt ${i + 1} failed: ${error.name} - ${error.message}`);
+            const isRetryable = ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNABORTED'].includes(error.code);
+
+            if (isRetryable && i < retries) {
+                logs.push(`Retryable error detected. Waiting ${delay}ms before retry ${i + 2}...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                logs.push(`Non-retryable error or retries exhausted. Rethrowing.`);
+                throw error;
+            }
+        }
+    }
+     throw new Error("Retry attempts exhausted without success or final error.");
+}
+
 
 function parseDownloadCommand(command) {
     command = command.trim();
@@ -86,16 +114,24 @@ app.post('/execute', async (req, res) => {
         nodeLogs.push(`Proxying command to Python: ${JSON.stringify(downloadInfo)}`);
         console.log(`Proxying command to Python backend: ${JSON.stringify(downloadInfo)}`);
         try {
-            const pythonResponse = await fetch(`${PYTHON_BACKEND_URL}/fetch-and-zip`, {
+            const fetchOptions = {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(downloadInfo),
-                timeout: 150000
-            });
+            };
+
+            const pythonResponse = await fetchWithRetry(
+                `${PYTHON_BACKEND_URL}/fetch-and-zip`,
+                fetchOptions,
+                PYTHON_RETRY_ATTEMPTS,
+                PYTHON_RETRY_DELAY_MS,
+                nodeLogs
+            );
+
 
             const status = pythonResponse.status;
             const contentType = pythonResponse.headers.get('content-type');
-            nodeLogs.push(`Python response status: ${status}, Content-Type: ${contentType}`);
+            nodeLogs.push(`Final Python response status: ${status}, Content-Type: ${contentType}`);
 
             res.status(status);
             if (contentType) {
@@ -117,11 +153,11 @@ app.post('/execute', async (req, res) => {
             pythonResponse.body.pipe(res);
 
         } catch (error) {
-            nodeLogs.push(`ERROR: Failed proxying to Python: ${error.message}`);
-            console.error(`Error proxying to Python backend: ${error.message}`);
+             nodeLogs.push(`ERROR: Failed proxying to Python after retries: ${error.name} - ${error.message}`);
+            console.error(`Error proxying to Python backend after retries: ${error.message}`);
             addLogHeaders(res, nodeLogs, 'X-Log-Proxy');
             res.status(502).json({
-                error: 'Failed to contact the file fetching service.',
+                error: 'Failed to contact the file fetching service after multiple attempts.',
                 details: error.message
             });
         }
